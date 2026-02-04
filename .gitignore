@@ -1,0 +1,12 @@
+
+
+# Environment variables
+.env
+.env.local
+tokens/
+
+credentials.json
+# Temporary files
+tmp/
+temps/
+__pycache__/
