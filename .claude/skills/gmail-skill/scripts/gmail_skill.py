@@ -6,16 +6,37 @@ Supports multiple accounts with seamless OAuth browser flow.
 
 Usage:
     python gmail_skill.py search "query" [--account EMAIL]
+    python gmail_skill.py search "from:scholaralerts-noreply@google.com" --date-range 2026-02-04
     python gmail_skill.py read EMAIL_ID [--account EMAIL]
     python gmail_skill.py list [--account EMAIL]
     python gmail_skill.py labels [--account EMAIL]
     python gmail_skill.py send --to EMAIL --subject "..." --body "..." [--account EMAIL]
     python gmail_skill.py mark-read EMAIL_ID [--account EMAIL]
     python gmail_skill.py mark-done EMAIL_ID [--account EMAIL]  # Archive (Gmail 'e')
+    python gmail_skill.py trash EMAIL_ID [--account EMAIL]      # Move to trash (recoverable)
+    python gmail_skill.py untrash EMAIL_ID [--account EMAIL]    # Restore from trash
+    python gmail_skill.py delete EMAIL_ID [--account EMAIL]     # Permanently delete (IRREVERSIBLE)
     python gmail_skill.py contacts [--account EMAIL]
     python gmail_skill.py search-contacts "query" [--account EMAIL]
     python gmail_skill.py accounts                    # List authenticated accounts
     python gmail_skill.py logout [--account EMAIL]    # Remove account
+
+Date Search:
+    --date-range YYYY-MM-DD     Search for emails on a specific date (uses Unix timestamps)
+    --date-start YYYY-MM-DD     Start date (inclusive)
+    --date-end YYYY-MM-DD       End date (exclusive)
+
+    Note: Using --date-range avoids PST timezone issues. Gmail's native date format
+    (after:2026/2/4) is interpreted as midnight in PST timezone, which can cause
+    incorrect results. The --date-range parameter converts dates to Unix timestamps.
+
+Deletion Commands:
+    trash       Move email(s) to trash (recoverable within 30 days)
+    untrash     Restore email(s) from trash
+    delete      Permanently delete email(s) - this action CANNOT be undone
+
+    Multiple IDs can be specified as comma-separated values:
+    python gmail_skill.py delete id1,id2,id3
 """
 
 import argparse
@@ -63,7 +84,8 @@ ACCOUNTS_META_FILE = SKILL_DIR / "accounts.json"
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/gmail.send",    # For sending (REQUIRES USER CONFIRMATION)
-    "https://www.googleapis.com/auth/gmail.modify",  # For mark-read, archive, etc.
+    "https://www.googleapis.com/auth/gmail.modify",  # For mark-read, archive, trash, etc.
+    "https://mail.google.com/",                      # For permanent delete (delete operation)
     "https://www.googleapis.com/auth/contacts.readonly",
     "https://www.googleapis.com/auth/contacts.other.readonly",
     "https://www.googleapis.com/auth/userinfo.email",  # To get email address
@@ -600,6 +622,44 @@ def create_message(to: str, subject: str, body: str, cc: str = None, bcc: str = 
     return {'raw': raw}
 
 
+# ============ Date Query Helpers ============
+
+def build_date_query(start_date: str, end_date: str = None) -> str:
+    """Build Gmail date query using Unix timestamps to avoid timezone issues.
+
+    Args:
+        start_date: Start date in YYYY-MM-DD format (inclusive)
+        end_date: End date in YYYY-MM-DD format (exclusive, defaults to day after start)
+
+    Returns:
+        Gmail query string with after/before timestamps
+
+    Example:
+        >>> build_date_query("2026-02-04")
+        'after:1738617600 before:1738704000'
+        >>> build_date_query("2026-02-01", "2026-02-05")
+        'after:1738368000 before:1738704000'
+    """
+    from datetime import datetime, timezone
+
+    # Parse start date (inclusive - start of day)
+    start_dt = datetime.fromisoformat(start_date).replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc)
+
+    # Parse end date (exclusive - start of day)
+    if end_date:
+        end_dt = datetime.fromisoformat(end_date).replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc)
+    else:
+        # Default to day after start date
+        from datetime import timedelta
+        end_dt = start_dt + timedelta(days=1)
+
+    # Convert to Unix timestamps (seconds since epoch)
+    start_timestamp = int(start_dt.timestamp())
+    end_timestamp = int(end_dt.timestamp())
+
+    return f"after:{start_timestamp} before:{end_timestamp}"
+
+
 # ============ Commands ============
 
 def cmd_accounts(args):
@@ -643,17 +703,37 @@ def cmd_search(args):
     """Search emails by query."""
     service = get_gmail_service(args.account)
 
+    # Build query with optional date range
+    query = args.query or ""
+
+    # Handle date range parameters
+    date_query = ""
+    if hasattr(args, 'date_range') and args.date_range:
+        # Single day: --date-range 2026-02-04
+        date_query = build_date_query(args.date_range)
+    elif hasattr(args, 'date_start') and args.date_start:
+        # Date range: --date-start 2026-02-01 --date-end 2026-02-05
+        end_date = getattr(args, 'date_end', None)
+        date_query = build_date_query(args.date_start, end_date)
+
+    # Combine base query with date query
+    if date_query:
+        if query:
+            query = f"{query} {date_query}"
+        else:
+            query = date_query
+
     try:
         results = service.users().messages().list(
             userId="me",
-            q=args.query,
+            q=query,
             maxResults=args.max_results,
         ).execute()
 
         messages = results.get("messages", [])
 
         if not messages:
-            print(json.dumps({"results": [], "total": 0}))
+            print(json.dumps({"results": [], "total": 0, "query": query}))
             return
 
         # Fetch details for each message
@@ -668,7 +748,7 @@ def cmd_search(args):
             email_list.append(format_email_summary(full_msg))
 
         output = {
-            "query": args.query,
+            "query": query,
             "results": email_list,
             "total": len(email_list),
             "resultSizeEstimate": results.get("resultSizeEstimate", 0),
@@ -957,6 +1037,85 @@ def cmd_unstar(args):
         "results": results,
         "total": len(results),
         "successful": sum(1 for r in results if r["success"]),
+    }, indent=2))
+
+
+def cmd_trash(args):
+    """Move email(s) to trash (recoverable within 30 days)."""
+    service = get_gmail_service(args.account)
+
+    # Support multiple IDs
+    email_ids = [id.strip() for id in args.email_ids.split(",")]
+
+    results = []
+    for email_id in email_ids:
+        try:
+            service.users().messages().trash(
+                userId="me",
+                id=email_id,
+            ).execute()
+            results.append({"id": email_id, "success": True})
+        except HttpError as e:
+            results.append({"id": email_id, "success": False, "error": str(e)})
+
+    print(json.dumps({
+        "action": "trash",
+        "results": results,
+        "total": len(results),
+        "successful": sum(1 for r in results if r["success"]),
+    }, indent=2))
+
+
+def cmd_untrash(args):
+    """Move email(s) out of trash (restore from trash)."""
+    service = get_gmail_service(args.account)
+
+    # Support multiple IDs
+    email_ids = [id.strip() for id in args.email_ids.split(",")]
+
+    results = []
+    for email_id in email_ids:
+        try:
+            service.users().messages().untrash(
+                userId="me",
+                id=email_id,
+            ).execute()
+            results.append({"id": email_id, "success": True})
+        except HttpError as e:
+            results.append({"id": email_id, "success": False, "error": str(e)})
+
+    print(json.dumps({
+        "action": "untrash",
+        "results": results,
+        "total": len(results),
+        "successful": sum(1 for r in results if r["success"]),
+    }, indent=2))
+
+
+def cmd_delete(args):
+    """Permanently delete email(s) (IRREVERSIBLE - use with caution)."""
+    service = get_gmail_service(args.account)
+
+    # Support multiple IDs
+    email_ids = [id.strip() for id in args.email_ids.split(",")]
+
+    results = []
+    for email_id in email_ids:
+        try:
+            service.users().messages().delete(
+                userId="me",
+                id=email_id,
+            ).execute()
+            results.append({"id": email_id, "success": True})
+        except HttpError as e:
+            results.append({"id": email_id, "success": False, "error": str(e)})
+
+    print(json.dumps({
+        "action": "delete",
+        "results": results,
+        "total": len(results),
+        "successful": sum(1 for r in results if r["success"]),
+        "warning": "This action is permanent and cannot be undone",
     }, indent=2))
 
 
@@ -1334,8 +1493,11 @@ def main():
 
     # Search emails command
     search_parser = subparsers.add_parser("search", help="Search emails by query")
-    search_parser.add_argument("query", help="Gmail search query")
+    search_parser.add_argument("query", help="Gmail search query", nargs='?')
     search_parser.add_argument("--max-results", type=int, default=10, help="Max results (default: 10)")
+    search_parser.add_argument("--date-range", help="Date range YYYY-MM-DD (single day)")
+    search_parser.add_argument("--date-start", help="Start date YYYY-MM-DD (inclusive)")
+    search_parser.add_argument("--date-end", help="End date YYYY-MM-DD (exclusive)")
     add_account_arg(search_parser)
     search_parser.set_defaults(func=cmd_search)
 
@@ -1411,6 +1573,24 @@ def main():
     unstar_parser.add_argument("email_ids", help="Email ID(s) to unstar (comma-separated for multiple)")
     add_account_arg(unstar_parser)
     unstar_parser.set_defaults(func=cmd_unstar)
+
+    # Trash command (move to trash - recoverable)
+    trash_parser = subparsers.add_parser("trash", help="Move email(s) to trash (recoverable within 30 days)")
+    trash_parser.add_argument("email_ids", help="Email ID(s) to trash (comma-separated for multiple)")
+    add_account_arg(trash_parser)
+    trash_parser.set_defaults(func=cmd_trash)
+
+    # Untrash command (restore from trash)
+    untrash_parser = subparsers.add_parser("untrash", help="Move email(s) out of trash (restore)")
+    untrash_parser.add_argument("email_ids", help="Email ID(s) to restore from trash (comma-separated for multiple)")
+    add_account_arg(untrash_parser)
+    untrash_parser.set_defaults(func=cmd_untrash)
+
+    # Delete command (permanent deletion - IRREVERSIBLE)
+    delete_parser = subparsers.add_parser("delete", help="Permanently delete email(s) - IRREVERSIBLE")
+    delete_parser.add_argument("email_ids", help="Email ID(s) to delete permanently (comma-separated for multiple)")
+    add_account_arg(delete_parser)
+    delete_parser.set_defaults(func=cmd_delete)
 
     # Labels command
     labels_parser = subparsers.add_parser("labels", help="List Gmail labels")

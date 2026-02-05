@@ -43,19 +43,21 @@ allowed-tools: "Read, Write, Bash, Skill, Task, AskUserQuestion"
 ### Step 1: 解析日期并搜索邮件
 
 ```bash
-# 构建日期查询 (使用 after:YYYY/M/D-1 before:YYYY/M/D+1 精确匹配当天)
+# 优先方案：使用 --date-range 参数（推荐）
+# 该参数自动将日期转换为 Unix 时间戳，避免 PST 时区问题
+# 注意：限定只搜索 Inbox 中的邮件
 target_date="2026-02-04"
-prev_date="2026/2/3"
-next_date="2026/2/5"
-query="from:scholaralerts-noreply@google.com after:${prev_date} before:${next_date}"
+result=$(python .claude/skills/gmail-skill/scripts/gmail_skill.py search \
+    "in:inbox from:scholaralerts-noreply@google.com" \
+    --date-range "$target_date")
 
-# 搜索邮件
-python .claude/skills/gmail-skill/scripts/gmail_skill.py search "${query}"
+# 降级方案：如果当天无邮件，查询最新 6 封
+if [ "$(echo $result | jq '.total')" -eq 0 ]; then
+    result=$(python .claude/skills/gmail-skill/scripts/gmail_skill.py search \
+        "in:inbox from:scholaralerts-noreply@google.com" \
+        --max-results 6)
+fi
 ```
-
-**日期查询技巧**：
-- 搜索 `2026-02-04` → `after:2026/2/3 before:2026/2/5`
-- 前后各扩展 1 天确保覆盖当天邮件
 
 ### Step 2: 并行读取邮件（单条消息）
 
@@ -145,14 +147,14 @@ relevant_papers.sort(key=lambda x: star_to_number(x.get("relevance_score", "★�
 
 完整模板见 [REFERENCE.md](REFERENCE.md#日报模板)。
 
-### Step 7: 归档已处理邮件
+### Step 7: 删除已处理邮件
 
 ```bash
-# 批量归档（使用逗号分隔多个 ID）
-python .claude/skills/gmail-skill/scripts/gmail_skill.py mark-done "id1,id2,id3,id4"
+# 批量删除（使用逗号分隔多个 ID）
+python .claude/skills/gmail-skill/scripts/gmail_skill.py trash "id1,id2,id3,id4"
 ```
 
-**错误处理**：归档失败仅记录警告，不影响日报生成完成状态。
+**错误处理**：删除失败仅记录警告，不影响日报生成完成状态。
 
 ### Step 8: 清理临时文件
 
@@ -196,7 +198,7 @@ outputs/scholar-reports/scholar-report-YYYY-MM-DD.md
 | 无邮件 | 提示"未找到 {date} 的 scholaralerts 邮件" |
 | Subagent 失败 | 记录错误,继续处理其他邮件 |
 | 无相关论文 | 提示"今日无相关论文",生成空日报（仅统计摘要） |
-| 归档邮件失败 | 记录警告,不影响日报生成 |
+| 删除邮件失败 | 记录警告,不影响日报生成 |
 
 ## 文件流程
 
@@ -211,7 +213,7 @@ Gmail search → 邮件 ID 列表
         ↓
 汇总生成日报 → outputs/scholar-reports/{date}-scholar-daily.md
         ↓
-归档已处理邮件
+删除已处理邮件（移到垃圾箱）
         ↓
 清理 temps 目录
 ```

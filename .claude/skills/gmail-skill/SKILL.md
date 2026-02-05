@@ -76,8 +76,29 @@ python {baseDir}/.claude/skills/gmail-skill/scripts/gmail_skill.py star 邮件ID
 python {baseDir}/.claude/skills/gmail-skill/scripts/gmail_skill.py unstar 邮件ID [--account 邮箱地址]
 ```
 
+### 移到垃圾箱 / 恢复
+将邮件移到垃圾箱（30天内可恢复）或从垃圾箱恢复。
+
+```bash
+# 移到垃圾箱（推荐 - 可恢复）
+python {baseDir}/.claude/skills/gmail-skill/scripts/gmail_skill.py trash 邮件ID [--account 邮箱地址]
+
+# 从垃圾箱恢复
+python {baseDir}/.claude/skills/gmail-skill/scripts/gmail_skill.py untrash 邮件ID [--account 邮箱地址]
+```
+
+### 永久删除
+⚠️ **谨慎使用** - 此操作不可撤销，邮件将被永久删除。
+
+```bash
+# 永久删除（不可逆）
+python {baseDir}/.claude/skills/gmail-skill/scripts/gmail_skill.py delete 邮件ID [--account 邮箱地址]
+```
+
+**建议**：优先使用 `trash` 命令移到垃圾箱，确认不再需要后再手动从垃圾箱永久删除。
+
 ### 批量操作提示
-标记类命令（`mark-read`、`mark-unread`、`mark-done`、`unarchive`、`star`、`unstar`）均支持多个 ID（逗号分隔）：
+标记类命令（`mark-read`、`mark-unread`、`mark-done`、`unarchive`、`star`、`unstar`、`trash`、`untrash`、`delete`）均支持多个 ID（逗号分隔）：
 ```bash
 python {baseDir}/.claude/skills/gmail-skill/scripts/gmail_skill.py mark-read "id1,id2,id3" --account user@gmail.com
 ```
@@ -171,19 +192,42 @@ python {baseDir}/.claude/skills/gmail-skill/scripts/gmail_skill.py read "id1,id2
 当邮件输出超过约40KB时（显示"输出内容过大"提示），可使用 `email_formatter.py` 格式化为 Markdown。详见 [ADVANCED.md](ADVANCED.md)。
 
 ### 日期搜索格式
-使用 Gmail 原生的日期搜索运算符：
-- `after:YYYY/M/D` - 指定日期之后的邮件（包含当天）
-- `before:YYYY/M/D` - 指定日期之前的邮件（包含当天）
+
+#### 推荐方式：使用 --date-range 参数（避免时区问题）
+
+⚠️ **重要**：Gmail 的 `after:YYYY/M/D before:YYYY/M/D` 格式会被解释为 **PST 时区的午夜**，导致时区问题。推荐使用 `--date-range` 参数，该参数自动将日期转换为 Unix 时间戳（使用 UTC）。
+
+**新增参数：**
+- `--date-range YYYY-MM-DD` - 查询指定日期的邮件
+- `--date-start YYYY-MM-DD` - 起始日期（包含）
+- `--date-end YYYY-MM-DD` - 结束日期（不包含）
+
+**示例：**
+```bash
+# 查询指定日期的邮件（推荐）
+python {baseDir}/.claude/skills/gmail-skill/scripts/gmail_skill.py search \
+    "from:scholaralerts-noreply@google.com" \
+    --date-range "2026-02-04"
+
+# 查询日期范围
+python {baseDir}/.claude/skills/gmail-skill/scripts/gmail_skill.py search \
+    "from:john@example.com" \
+    --date-start "2026-02-01" \
+    --date-end "2026-02-05"
+
+# 相对时间查询（不受时区影响）
+python {baseDir}/.claude/skills/gmail-skill/scripts/gmail_skill.py search \
+    "from:alert@example.com newer_than:7d"
+```
+
+#### 旧格式（不推荐用于精确日期查询）
+
+Gmail 原生的日期搜索运算符：
+- `after:YYYY/M/D` - 指定日期之后的邮件（包含当天，但使用 PST 时区）
+- `before:YYYY/M/D` - 指定日期之前的邮件（包含当天，但使用 PST 时区）
 - `newer_than:Nd` - 最近 N 天内的邮件
 
-示例：
-```bash
-# 指定日期范围
-python {baseDir}/.claude/skills/gmail-skill/scripts/gmail_skill.py search "from:john@example.com after:2026/2/1 before:2026/2/3"
-
-# 最近的邮件
-python {baseDir}/.claude/skills/gmail-skill/scripts/gmail_skill.py search "from:alert@example.com newer_than:7d"
-```
+⚠️ **注意**：使用 `after:YYYY/M/D before:YYYY/M/D` 进行精确日期查询时，由于 PST 时区解释问题，可能导致日期范围不准确。建议使用 `--date-range` 参数代替。
 
 更多高级用法详见 [ADVANCED.md](ADVANCED.md)。
 
